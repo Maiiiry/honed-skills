@@ -172,7 +172,20 @@ first line.
 | Elbowed | rare |
 
 Draw bidirectionality as **two parallel single-headed arrows**, which is what Excalidraw's own
-templates do.
+templates do. Keep them apart: two strokes on one line read as one double-headed arrow, so the
+builder gives each arrow between the same two nodes, either direction, its own lane 20 px apart.
+
+**Crossings first, then everything else.** The one controlled experiment that ranked layout
+aesthetics against each other, Purchase 1997
+([doi:10.1007/3-540-63938-1_67](https://doi.org/10.1007/3-540-63938-1_67)), found edge crossings
+significant for both reading errors and response time, and different from every other aesthetic it
+tested. Bends were significant for errors only. Symmetry, minimum angle and orthogonality were not
+significant for errors. The study used one graph, so read it as a ranking, not as a threshold: there
+is no measured "at most N crossings". That is why `arrow-crossing` is a warn and there is no bend
+rule. Two strokes running along one line are worse than a crossing, because the reader cannot tell
+which is which, so `arrow-overlap` is a warn too. Exempt from both, because they read as intended:
+a spur ending on a trunk, arrows fanning out of or into one shape, and a trunk where several strokes
+merge into one target.
 
 Excalidraw's four documented routing constraints, from its own engineering post on elbow arrows:
 take the most direct path; fewer turns; **arrowheads point at the target and never enter it**; the
@@ -252,6 +265,19 @@ prose is parked unboxed in open canvas, never inside a node.
 
 **Timeline.** One axis, and **name the axis as a first-class element**: a long thin labelled arrow
 spanning the band, so the direction of travel is stated rather than implied.
+
+**C4 (system context, container, component).** From the C4 model at
+[c4model.com](https://c4model.com) (CC BY 4.0), restated here in our own words. Every box says what
+kind of thing it is (person, software system, container, component) and, from container level
+down, what technology it is built with. Systems you do not own are marked external and drawn in a
+neutral grey. Every arrow carries a short phrase about intent (what flows, and why), plus its
+protocol where that matters; a bare "uses" tells the reader nothing. Every diagram has a title that
+names its type and scope. Stay at one zoom level per diagram, and when a container view grows past
+about twenty containers, split it. Put the type and technology on a second line of the same label,
+in brackets, so they move with the box. A database is a container; Excalidraw has no cylinder, so
+it is drawn as an ellipse and the label still says Container. The lint notes for this recipe are
+tagged "c4model checklist"; scope, direction-versus-label and mixed zoom levels still need a human
+read.
 
 **Data lineage.** Draw fan-in as a vertical bus with horizontal spurs rather than N diagonals.
 Zone headers can *be* the legend by carrying the layer name plus its two identifying properties, in

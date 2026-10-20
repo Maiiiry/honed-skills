@@ -4,8 +4,8 @@ description: Use when producing a diagram as a .excalidraw file, or when asked f
 license: Apache-2.0
 compatibility: Requires Python 3.9+ and nothing else for the build and the lint. PyYAML only if the spec is YAML rather than JSON. Chrome is needed to look at a render and to regenerate the font metrics, and is invoked by you rather than by any script here.
 metadata:
-  version: "1.1.1"
-  changeSummary: Frontmatter only. metadata values are strings under the Agent Skills spec, so isBreaking is now "false" rather than a YAML boolean. The skill itself is unchanged.
+  version: "1.2.0"
+  changeSummary: Adds crossing, overlap and label-collision lint rules, C4 typing and provenance in the spec with matching lint notes, a Mermaid label-fidelity checker, and offset reverse arrow pairs.
   isBreaking: "false"
 ---
 
@@ -25,6 +25,7 @@ metadata:
 S=~/.claude/skills/excalidraw/scripts
 python3 $S/exdraw.py mydiagram.yaml -o mydiagram.excalidraw   # build
 python3 $S/exlint.py mydiagram.excalidraw                     # MANDATORY, before looking
+python3 $S/exfidelity.py source.mmd mydiagram.excalidraw      # only when redrawn from Mermaid
 python3 $S/exsvg.py mydiagram.excalidraw -o preview.svg       # deterministic preview
 google-chrome --headless --disable-gpu --screenshot=preview.png \
   --window-size=1600,1200 preview.svg                         # then READ the png
@@ -76,6 +77,38 @@ notes:
     text: rate-limited, 100 rps
 ```
 
+`type: c4` adds C4 notation ([c4model.com](https://c4model.com)) and one more pair of fields is open to every type, provenance:
+
+```yaml
+type: c4
+title: Online shop, containers       # required whenever `source` is set
+source: {repo: example.org/acme/shop, commit: 3f9a2c1}   # 7 to 64 hex characters
+
+nodes:
+  - id: api
+    label: Orders API
+    c4: container                    # person | system | container | component
+    tech: Python, FastAPI            # becomes "[Container: Python, FastAPI]" in the same label
+    at: api/orders/routes.py:12-140  # repo-relative path:lines, or `external`
+  - id: db
+    label: Orders database
+    c4: container
+    tech: Postgres
+    shape: database                  # drawn as an ellipse: Excalidraw has no cylinder
+  - id: pay
+    label: Payment provider
+    c4: system
+    external: true                   # grey, typed External Software System
+
+edges:
+  - from: api
+    to: db
+    label: Reads and writes orders   # what flows, never just "uses"
+    tech: SQL                        # becomes a "[SQL]" line in the arrow label
+```
+
+The type and the technology go into the ONE bound label, at the same size, so they move with the shape. `c4`, `tech`, `external` and `shape` outside `type: c4` are a spec error, and so are an absolute path or `..` in `at`, and a `source` with no `title`. Everything lands in `customData` (`c4`, `tech`, `provenance`, and `role: title` on the title), which Excalidraw preserves verbatim and the linter reads. A full example is [`examples/c4.yaml`](examples/c4.yaml).
+
 Everything else is derived. `style` is one decision that sets roughness, fill and font together, which is what keeps a diagram internally consistent.
 
 ## Design rules, measured rather than asserted
@@ -90,7 +123,7 @@ From 20 real published `.excalidraw` scenes (about 1,700 elements) and all 232 c
 6. **Gutters about 1.5x node height, minimum 40 px.** Not the 200 to 300 px the popular skills prescribe, which is two to three times what real diagrams use.
 7. **Nesting inset 20 px, and stop at three levels.** Encode depth by desaturating one hue, never by stacking saturated fills.
 8. **Labels of 1 to 3 words, bound to the container.** 106 of 218 real labels are one word. The cleanest scenes bind 90 to 100% of labels; the messy ones bind none. Binding is what centres the label and grows the box.
-9. **Arrows: 2 points, one head, bound at both ends.** 82% of real arrows are straight 2-point; `(null, "arrow")` in 13 of 13 scenes. Double-headed arrows are 2% of the corpus, so draw bidirectionality as two parallel arrows.
+9. **Arrows: 2 points, one head, bound at both ends.** 82% of real arrows are straight 2-point; `(null, "arrow")` in 13 of 13 scenes. Double-headed arrows are 2% of the corpus, so draw bidirectionality as two parallel arrows. The builder gives every arrow between the same two nodes its own lane 20 px apart (a reverse pair sits 10 px each way), so no two share one line.
 10. **Bind an arrow label to the arrow.** That is how it gets an opaque backing: the renderer punches a hole of label + 10 px through the arrow behind a *bound* label. Free text laid over an arrow does not get it.
 11. **Two text sizes, three at most, on the 16/20/28/36 ladder.** A fractional font size is the most reliable machine-detectable tell of an unmade diagram, because it comes from dragging a text box.
 12. **Two typefaces, two jobs.** Hand-drawn for prose, the code font for anything literal: IPs, paths, commands, table and topic names.
@@ -103,7 +136,7 @@ Full reference in [`references/element-schema.md`](references/element-schema.md)
 
 - **Bindings are reciprocal and `restore` repairs neither.** An arrow follows a moved shape via the SHAPE's `boundElements`; its endpoint comes from the ARROW's binding. Different mechanisms, both required. One alone renders correctly and detaches on first drag. This is the most-reported defect in agent-written Excalidraw files.
 - **The binding schema changed.** Current is `{elementId, fixedPoint: [rx, ry], mode: "orbit"}`. `focus` and `gap` are gone from the type, and a legacy binding is migrated by *discarding your numbers and recomputing from where the points already are* - so endpoint geometry is the real contract.
-- **No `fixedPoint` coordinate may be exactly `0.5`.** It is snapped to `0.5001` to stop the arrow heading flipping. This builder writes `0.5001`.
+- **No `fixedPoint` coordinate may be exactly `0.5`.** It is snapped off centre to stop the arrow heading flipping. This builder writes `0.5002`, because the upstream `0.5001` minus `0.5` is just under `0.0001` in IEEE 754 double, which is still inside the `1e-4` guard it was chosen to clear.
 - **`points[0]` must be `[0, 0]`** on any linear element, or the element visibly jumps on load.
 - **`endArrowhead` defaults to `"arrow"` when omitted.** Write `null` for a headless arrow.
 - **Always write `lineHeight`.** Omit it while supplying a height and Excalidraw back-derives a bogus value that permanently distorts line spacing.
@@ -115,7 +148,7 @@ Full reference in [`references/element-schema.md`](references/element-schema.md)
 
 ## Determinism
 
-**The same spec produces a byte-identical file.** Ids, `seed` and `versionNonce` come from a BLAKE2b of the spec plus each element's path within it; `created`/`updated` default to a fixed epoch; layout iteration counts are fixed and every tie-break sorts on a stable key.
+**The same spec produces a byte-identical file.** Ids, `seed` and `versionNonce` come from a BLAKE2b of the spec (as canonical JSON, with `source` and every node and edge `at` left out, so bumping a commit does not re-roll the seeds) plus each element's path within it; `created`/`updated` default to a fixed epoch; layout iteration counts are fixed and every tie-break sorts on a stable key.
 
 No prior implementation manages this. The most-installed skill in the field seeds from Python's `hash()`, which is salted per process by `PYTHONHASHSEED`, so it looks reproducible and is not; the closest CLI uses `Math.random()` and `Date.now()`.
 
@@ -131,9 +164,13 @@ cmp a.excalidraw b.excalidraw && echo "byte-identical"
 
 ## Verification
 
-1. **Lint.** `exlint.py` checks referential integrity in both directions, `points[0]`, roundness class, 0x0 elements, NaN, exact-zero coordinates, text overflow, off-canvas, node overlap, lines through boxes, and the style rules above. A blind A/B on seeded defects found geometric checks caught 12 of 12 with no false positives, versus 11 of 12 with one false positive by eyeballing renders. Lint first, always.
-2. **Look at it.** Render and read the PNG. The SVG preview is exact on geometry and an approximation of stroke texture.
-3. **Open it in Excalidraw once and drag a bound shape.** Confirm the arrow follows and the label stays centred. No linter can check that, and it is the failure this skill exists to prevent.
+1. **Lint.** `exlint.py` checks referential integrity in both directions, `points[0]`, roundness class, 0x0 elements, NaN, exact-zero coordinates, text overflow, node overlap, lines through boxes, and the style rules above. A blind A/B on seeded defects found geometric checks caught 12 of 12 with no false positives, versus 11 of 12 with one false positive by eyeballing renders. Lint first, always.
+   - **Strokes, solved exactly.** `arrow-crossing` (warn): two arrows or lines cross. Crossings are the one layout aesthetic with measured weight on reading errors and time, see [`design-rules.md`](references/design-rules.md) section 6. Not a crossing: a touch (one stroke ends on the other, a bus spur), a fan-out or fan-in (within 8 px of an end that both strokes bind to the same shape). `arrow-overlap` (warn): two strokes on one line, which is worse than a crossing. Exempt only when the two share exactly one bound end (a trunk that splits, or spurs merging into one target); two strokes sharing both ends are a duplicate drawn on itself. `arrow-through-label` (warn): a stroke across another arrow's label. A multi-point arrow, rounded or not, is tested as its polyline. The summary line ends with `crossings: N`, so two layouts compare by number.
+   - **C4, as notes tagged "c4model checklist"**, active when any element carries `customData.c4`: `c4-untyped` (a boundary is exempt), `c4-no-tech` on a container or component, `c4-vague-edge` (no label, or only uses, calls, connects to, talks to, depends on or interacts with), `c4-no-title`, `c4-too-many` at 20 containers. Not checked, because it needs a human: whether the scope is clear, whether a label reads in its arrow's direction, and mixed zoom levels in one diagram.
+   - **Provenance**, active when the title carries a `source`: `provenance-missing` (warn) on a shape or arrow with no `at`, `provenance-commit` (error) on a commit that is not 7 to 64 hex characters. Whether each line range still says what the edge claims is not checked: that needs the repo and a reader.
+2. **Fidelity, when the diagram is a redraw of a Mermaid flowchart.** `exfidelity.py source.mmd out.excalidraw [--json]` lists every node, edge and subgraph label kept, missing or ambiguous, every source edge with or without an arrow between the matching shapes, and every arrow with no source edge. A node must equal one shape's bound label exactly (the `[type: tech]` line aside), one node to one shape; an edge label is read from its own arrow, so swapped labels fail; a match with two candidates fails as ambiguous. Exit 0 all kept, 1 something lost or ambiguous, 2 the source or the scene cannot be read (any crash is 2 as well, in all three scripts). It reads `flowchart` and `graph` only and fails closed: any other diagram type, or one line it does not understand, is exit 2, never a silent pass.
+3. **Look at it.** Render and read the PNG. The SVG preview is exact on geometry and an approximation of stroke texture.
+4. **Open it in Excalidraw once and drag a bound shape.** Confirm the arrow follows, the label stays centred, and on a C4 or sourced diagram that `customData` survives a save. No linter can check that, and it is the failure this skill exists to prevent.
 
 ## Gotchas
 

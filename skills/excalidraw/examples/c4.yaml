@@ -1,0 +1,59 @@
+# A C4 container diagram: one person, three containers, one external system.
+# Every relationship says what flows and over what; every box and arrow cites where it lives in
+# the code, or says `external` when it lives outside it. The repo and the paths are made up.
+type: c4
+title: Online shop, containers
+style: architecture
+fontSize: md
+source:
+  repo: example.org/acme/shop
+  commit: 3f9a2c1d8e7b6a5f4c3d2e1f0a9b8c7d6e5f4a3b
+
+nodes:
+  - id: customer
+    label: Customer
+    c4: person
+    at: external
+  - id: web
+    label: Web shop
+    c4: container
+    tech: TypeScript, React
+    at: web/src/App.tsx:1-80
+  - id: api
+    label: Orders API
+    c4: container
+    tech: Python, FastAPI
+    at: api/orders/routes.py:12-140
+  - id: db
+    label: Orders database
+    c4: container
+    tech: Postgres
+    shape: database
+    at: api/orders/models.py:1-60
+  - id: pay
+    label: Payment provider
+    c4: system
+    external: true       # drawn grey, typed External Software System
+    at: external
+
+edges:
+  - from: customer
+    to: web
+    label: Places orders
+    tech: HTTPS
+    at: external
+  - from: web
+    to: api
+    label: Submits orders
+    tech: JSON over HTTPS
+    at: web/src/api/client.ts:20-44
+  - from: api
+    to: db
+    label: Reads and writes orders
+    tech: SQL
+    at: api/orders/repository.py:8-90
+  - from: api
+    to: pay
+    label: Charges cards
+    tech: HTTPS
+    at: api/payments/client.py:15-52

@@ -21,7 +21,8 @@ The model writes a spec of tens of lines; this produces the hundreds of lines of
 DETERMINISM IS A GUARANTEE, NOT A HAPPY ACCIDENT
 ------------------------------------------------
 The same spec produces a BYTE-IDENTICAL file. Element ids, `seed` and `versionNonce` are derived
-from a BLAKE2b of the spec content plus the element's path within it; timestamps default to a fixed
+from a BLAKE2b of the spec content (canonical JSON, provenance left out) plus the element's path
+within it; timestamps default to a fixed
 epoch; `index` is omitted so Excalidraw derives it from array order; every layout tie-break sorts on
 a stable key. No prior implementation does this: the most-installed one seeds from Python's `hash()`,
 which is salted per process by PYTHONHASHSEED, so it looks reproducible and is not.
@@ -103,6 +104,21 @@ ORIGIN = 100          # never emit exactly 0: three upstream falsy-zero bugs are
 
 ROUNDNESS_ADAPTIVE = {"type": 3}      # rectangle, image, iframe, embeddable
 ROUNDNESS_PROPORTIONAL = {"type": 2}  # line, arrow, diamond
+
+# A reverse pair (a -> b plus b -> a) is drawn as two parallel arrows, rule 9. Without an offset the
+# two land on one line and read as a single double-headed stroke, which the linter reports as
+# `arrow-overlap`. Each arrow moves this far to its own right-hand side, so the pair sits 20 px apart.
+REVERSE_PAIR_OFFSET = 10.0
+
+# C4 notation (c4model.com). The type and the technology go into the ONE bound label, as a second
+# line in square brackets, at the same size: a second free text would not move with the shape.
+C4_TYPES = {"person": "Person", "system": "Software System", "container": "Container",
+            "component": "Component"}
+C4_SHAPES = {"database"}
+C4_NODE_FIELDS = ("c4", "external", "shape", "tech")
+COMMIT_HEX = set("0123456789abcdefABCDEF")
+C4_MAX_WIDTH = 320
+LABEL_CLEARANCE = 20   # px between an arrow label and the box at either end of its arrow
 
 
 # ---------------------------------------------------------------- text metrics
@@ -212,6 +228,23 @@ class Ids:
 
     def __init__(self, spec_bytes: bytes):
         self.root = hashlib.blake2b(spec_bytes, digest_size=16).digest()
+
+    @staticmethod
+    def identity_bytes(spec: dict) -> bytes:
+        """The spec as hashed: canonical JSON, WITHOUT the provenance fields.
+
+        `source` and every node or edge `at` are left out, so bumping a commit or a line range does
+        not re-roll every id and seed in the diagram. Canonical JSON (sorted keys) rather than the
+        raw file bytes, so a comment or a reformat does not re-roll them either. A note's `at` is its
+        anchor node, not provenance, and stays in.
+        """
+        clean = {k: v for k, v in spec.items() if k != "source"}
+        for key in ("nodes", "edges"):
+            if isinstance(clean.get(key), list):
+                clean[key] = [{k: v for k, v in item.items() if k != "at"}
+                              if isinstance(item, dict) else item for item in clean[key]]
+        return json.dumps(clean, sort_keys=True, ensure_ascii=False,
+                          separators=(",", ":"), default=str).encode("utf-8")
 
     def _digest(self, path: str) -> bytes:
         return hashlib.blake2b(self.root + path.encode("utf-8"), digest_size=16).digest()
@@ -354,15 +387,19 @@ class Scene:
 
     def arrow(self, path: str, src: dict, dst: dict, label: str = "",
               stroke: str = NEUTRAL_STROKE, stroke_style: str = "solid",
-              end_head: str | None = "arrow", detour: float = 0.0) -> list[dict]:
+              end_head: str | None = "arrow", detour: float = 0.0,
+              offset: float = 0.0) -> list[dict]:
         """A bound arrow, with the endpoint geometry the binding implies.
 
         Both halves of every binding are written: the arrow follows a moved shape via the SHAPE's
         boundElements, while the endpoint comes from the ARROW's binding. Different mechanisms,
         both required, and `restore` repairs neither. This is the single most-reported defect in
         every agent-written Excalidraw file.
+
+        `offset` moves the whole arrow that many px to the right-hand side of its direction of
+        travel. A reverse pair gets it on both arrows, which puts them on opposite sides.
         """
-        sx, sy, ex, ey, sfp, efp = self._edge_points(src, dst)
+        sx, sy, ex, ey, sfp, efp, side = self._edge_points(src, dst, offset)
         points = [[0, 0], [round(ex - sx, 2), round(ey - sy, 2)]]
         if detour:
             # A SKIP EDGE GETS A BEND, because a straight one crosses whatever sits between its
@@ -409,6 +446,12 @@ class Scene:
             mid_y = anchor_y - th / 2
             if len(points) >= 3:
                 mid_y += th * 0.6 + 2       # below the bend, clear of the shaft
+            elif offset and abs(ex - sx) >= abs(ey - sy):
+                # One arrow of a reverse pair: the label goes on the OUTSIDE of the pair, on the
+                # side this arrow was moved to, so the two labels do not land on each other.
+                mid_y += (th * 0.75 + 2) * (1 if side[1] * offset > 0 else -1)
+            elif offset:
+                mid_x += (tw / 2 + 6) * (1 if side[0] * offset > 0 else -1)
             elif abs(ex - sx) >= abs(ey - sy):
                 mid_y -= th * 0.75 + 2      # above a horizontal shaft
             else:
@@ -424,31 +467,41 @@ class Scene:
             out.append(text)
         return out
 
-    def _edge_points(self, a: dict, b: dict):
-        """Endpoints just outside each outline, plus the proportional fixedPoint for each.
+    def _edge_points(self, a: dict, b: dict, offset: float = 0.0):
+        """Endpoints just outside each outline, the proportional fixedPoint for each, and the unit
+        vector of the side the arrow was moved to.
 
         `fixedPoint` is a ratio in the target's unrotated box: [0,0] top-left, [1,1] bottom-right.
         Ratios legally exceed 0..1, which is how an orbit point sits outside the outline. Neither
-        coordinate may be exactly 0.5.
+        coordinate may be exactly 0.5, so an offset of 0 writes HALF.
         """
         acx, acy = a["x"] + a["width"] / 2, a["y"] + a["height"] / 2
         bcx, bcy = b["x"] + b["width"] / 2, b["y"] + b["height"] / 2
         gap = BASE_BINDING_GAP + self.style["strokeWidth"] / 2
+
+        def across(shift: float, size: float) -> float:
+            ratio = round(0.5 + shift / max(size, 1), 4)
+            return HALF if abs(ratio - 0.5) < 1e-4 else ratio
+
         if abs(bcx - acx) >= abs(bcy - acy):
-            if bcx >= acx:                       # left to right
-                return (a["x"] + a["width"] + gap, acy, b["x"] - gap, bcy,
-                        [round(1 + gap / max(a["width"], 1), 4), HALF],
-                        [round(-gap / max(b["width"], 1), 4), HALF])
-            return (a["x"] - gap, acy, b["x"] + b["width"] + gap, bcy,
-                    [round(-gap / max(a["width"], 1), 4), HALF],
-                    [round(1 + gap / max(b["width"], 1), 4), HALF])
-        if bcy >= acy:                           # top to bottom
-            return (acx, a["y"] + a["height"] + gap, bcx, b["y"] - gap,
-                    [HALF, round(1 + gap / max(a["height"], 1), 4)],
-                    [HALF, round(-gap / max(b["height"], 1), 4)])
-        return (acx, a["y"] - gap, bcx, b["y"] + b["height"] + gap,
-                [HALF, round(-gap / max(a["height"], 1), 4)],
-                [HALF, round(1 + gap / max(b["height"], 1), 4)])
+            if bcx >= acx:                       # left to right, right-hand side is down
+                d = offset
+                return (a["x"] + a["width"] + gap, acy + d, b["x"] - gap, bcy + d,
+                        [round(1 + gap / max(a["width"], 1), 4), across(d, a["height"])],
+                        [round(-gap / max(b["width"], 1), 4), across(d, b["height"])], (0, 1))
+            d = -offset                          # right to left, right-hand side is up
+            return (a["x"] - gap, acy + d, b["x"] + b["width"] + gap, bcy + d,
+                    [round(-gap / max(a["width"], 1), 4), across(d, a["height"])],
+                    [round(1 + gap / max(b["width"], 1), 4), across(d, b["height"])], (0, -1))
+        if bcy >= acy:                           # top to bottom, right-hand side is left
+            d = -offset
+            return (acx + d, a["y"] + a["height"] + gap, bcx + d, b["y"] - gap,
+                    [across(d, a["width"]), round(1 + gap / max(a["height"], 1), 4)],
+                    [across(d, b["width"]), round(-gap / max(b["height"], 1), 4)], (-1, 0))
+        d = offset                               # bottom to top, right-hand side is right
+        return (acx + d, a["y"] - gap, bcx + d, b["y"] + b["height"] + gap,
+                [across(d, a["width"]), round(-gap / max(a["height"], 1), 4)],
+                [across(d, b["width"]), round(1 + gap / max(b["height"], 1), 4)], (1, 0))
 
 
 class SpecError(Exception):
@@ -531,10 +584,15 @@ def order_within_ranks(nodes: list[str], edges: list[tuple[str, str]],
 
 def tree_positions(root: str, children: dict[str, list[str]], depth: int = 0,
                    cursor: list[int] | None = None,
-                   out: dict[str, tuple[int, int]] | None = None):
-    """Tidy tree: leaves take the next free column, a parent centres over its children."""
+                   out: dict[str, tuple[int, int]] | None = None,
+                   path: frozenset = frozenset()):
+    """Tidy tree: leaves take the next free column, a parent centres over its children. A cycle
+    is a spec error rather than a recursion that never ends."""
     cursor = [0] if cursor is None else cursor
     out = {} if out is None else out
+    if root in path:
+        raise SpecError(f"a tree cannot contain a cycle, and {root!r} is its own ancestor; "
+                        "use type: flow for a graph with cycles")
     kids = children.get(root, [])
     if not kids:
         out[root] = (cursor[0], depth)
@@ -542,7 +600,7 @@ def tree_positions(root: str, children: dict[str, list[str]], depth: int = 0,
         return out
     spans = []
     for kid in kids:
-        tree_positions(kid, children, depth + 1, cursor, out)
+        tree_positions(kid, children, depth + 1, cursor, out, path | {root})
         spans.append(out[kid][0])
     out[root] = ((spans[0] + spans[-1]) / 2, depth)
     return out
@@ -566,14 +624,123 @@ def load_spec(path: Path) -> tuple[dict, bytes]:
     return yaml.safe_load(text), raw
 
 
-def build(spec: dict, spec_bytes: bytes, stamp: int = FIXED_EPOCH) -> dict:
+def check_path(where: str, field: str, value: object) -> str:
+    """A repo-relative path or a repo name: a string with no control character, no scheme or
+    drive (no colon at all), no percent-encoding, not absolute, no empty part and no `..`.
+    Anything else would leak the machine the diagram was drawn on, or point outside the repo."""
+    if not isinstance(value, str):
+        raise SpecError(f"{where}: {field} must be a quoted string, not {type(value).__name__}")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise SpecError(f"{where}: {field} contains a control character")
+    norm = value.strip().replace("\\", "/")
+    parts = norm.split("/")
+    if (":" in norm or "%" in norm or norm.startswith(("/", "~")) or "" in parts
+            or ".." in parts):
+        raise SpecError(f"{where}: {field} {value!r} must be relative, with no scheme, drive, "
+                        "percent-encoding, empty part or `..`")
+    return norm
+
+
+def check_at(where: str, at: object) -> str:
+    """A provenance pointer: a repo-relative `path:lines`, or `external` for a box outside the
+    code. `at: null` is an error, not a silent "None"."""
+    if not isinstance(at, str):
+        raise SpecError(f"{where}: `at` must be a quoted string, path:lines or external")
+    text = at.strip()
+    if not text:
+        raise SpecError(f"{where}: `at` is empty")
+    if text == "external":
+        return text
+    path, sep, lines = text.rpartition(":")
+    if not sep or not lines.replace("-", "").isdigit():
+        path = text                      # no line range: the whole string is the path
+    check_path(where, "`at`", path if path else ":")
+    return text
+
+
+def check_source(spec: dict) -> dict | None:
+    """Item 8 and 9 of the plan review: `source` needs a title to live on, and a commit is 7 to
+    64 hex characters (a short SHA-1 up to a full SHA-256)."""
+    source = spec.get("source")
+    if source is None:
+        return None
+    if not isinstance(source, dict) or not source.get("repo") or not source.get("commit"):
+        raise SpecError("`source` needs both `repo` and `commit`")
+    if not spec.get("title"):
+        raise SpecError("`source` is stored on the title, so a spec with `source` needs a `title`")
+    repo = check_path("source", "`repo` (name it host/owner/name)", source["repo"])
+    commit = source["commit"]
+    if not isinstance(commit, str):
+        raise SpecError("`source.commit` is not a string; quote the commit, because YAML reads "
+                        "an all-digit hash such as 1234567 as a number")
+    if not 7 <= len(commit) <= 64 or not set(commit) <= COMMIT_HEX:
+        raise SpecError(f"`source.commit` {commit!r} is not 7 to 64 hex characters")
+    return {"repo": repo, "commit": commit}
+
+
+def c4_label(node: dict, label: str) -> str:
+    """`Name` plus `[Type: tech]` on a second line of the same bound label."""
+    kind = node.get("c4")
+    if kind is None:
+        return label
+    word = C4_TYPES[str(kind)]
+    if node.get("external"):
+        word = "External " + word
+    tech = node.get("tech")
+    return f"{label}\n[{word}: {tech}]" if tech else f"{label}\n[{word}]"
+
+
+def c4_min_width(scene: "Scene", text: str, font_size: int) -> float:
+    """A C4 label carries a type line, so the box starts as wide as its widest line (capped), which
+    keeps the 2.5 to 3.5 : 1 aspect instead of wrapping into a tall square."""
+    widest = max(scene.m.line_width(line, scene.style["font"], font_size)
+                 for line in text.split("\n"))
+    return min(max(MIN_NODE_W * 3, widest + 2 * BOUND_TEXT_PADDING), C4_MAX_WIDTH)
+
+
+def custom_data(*pairs: tuple[str, object]) -> dict:
+    """customData in a fixed key order, skipping empty values, so a rebuild is byte-identical."""
+    return {k: v for k, v in pairs if v not in (None, False, "")}
+
+
+def build(spec: dict, spec_bytes: bytes | None = None, stamp: int = FIXED_EPOCH) -> dict:
+    """`spec_bytes` is accepted for compatibility and ignored: ids hash `Ids.identity_bytes`."""
+    del spec_bytes
     metrics = Metrics()
-    scene = Scene(spec, metrics, Ids(spec_bytes), stamp)
+    scene = Scene(spec, metrics, Ids(Ids.identity_bytes(spec)), stamp)
     kind = spec.get("type", "flow")
     nodes = spec.get("nodes") or []
     if not nodes:
         raise SpecError("a spec needs at least one entry under `nodes`")
     edges_raw = spec.get("edges") or []
+    if not isinstance(nodes, list) or not all(isinstance(n, dict) and "id" in n for n in nodes):
+        raise SpecError("`nodes` must be a list of mappings, each with an `id`")
+    if not isinstance(edges_raw, list) or not all(
+            isinstance(e, dict) and "from" in e and "to" in e for e in edges_raw):
+        raise SpecError("`edges` must be a list of mappings, each with `from` and `to`")
+    source = check_source(spec)
+    is_c4 = kind == "c4"
+    for node in nodes:
+        # Values hoisted out of the f-strings: a nested quote inside one opens a span a bounded
+        # static parser cannot close (see exlint.py, case()).
+        node_id, c4_value, shape_value = node.get("id"), node.get("c4"), node.get("shape")
+        where = f"node {node_id!r}"
+        used = ", ".join(f for f in C4_NODE_FIELDS if f in node)
+        if used and not is_c4:
+            raise SpecError(f"{where}: `{used}` only applies under `type: c4`")
+        if c4_value is not None and str(c4_value) not in C4_TYPES:
+            raise SpecError(f"{where}: c4 {c4_value!r}; pick one of {sorted(C4_TYPES)}")
+        if shape_value is not None and str(shape_value) not in C4_SHAPES:
+            raise SpecError(f"{where}: shape {shape_value!r}; pick one of {sorted(C4_SHAPES)}")
+        if "at" in node:
+            check_at(where, node["at"])
+    for e in edges_raw:
+        edge_from, edge_to = e.get("from"), e.get("to")
+        where = f"edge {edge_from!r} -> {edge_to!r}"
+        if "tech" in e and not is_c4:
+            raise SpecError(f"{where}: tech only means something under `type: c4`")
+        if "at" in e:
+            check_at(where, e["at"])
 
     ids = [str(n["id"]) for n in nodes]
     if len(set(ids)) != len(ids):
@@ -612,22 +779,46 @@ def build(spec: dict, spec_bytes: bytes, stamp: int = FIXED_EPOCH) -> dict:
     else:
         raise SpecError(f"unknown type {kind!r}")
 
+    def edge_label(e: dict) -> str:
+        label = str(e.get("label") or "")
+        tech = str(e.get("tech") or "") if is_c4 else ""
+        if tech:
+            return f"{label}\n[{tech}]" if label else f"[{tech}]"
+        return label
+
     # Build the shapes first so their measured sizes drive the spacing.
     shapes: dict[str, dict] = {}
     labels: dict[str, dict] = {}
     font_size = FONT_SIZES.get(str(spec.get("fontSize", "md")), DEFAULT_FONT_SIZE)
     for node in nodes:
         nid = str(node["id"])
-        role = str(node.get("color") or ("ink" if not node.get("emphasis") else "blue"))
+        default_role = "blue" if node.get("emphasis") else "grey" if node.get("external") else "ink"
+        role = str(node.get("color") or default_role)
         colours = PALETTE.get(role, PALETTE["ink"])
         shape_kind = {"decision": "diamond", "start": "ellipse", "end": "ellipse",
                       "state": "ellipse"}.get(str(node.get("kind") or ""), "rectangle")
+        if node.get("shape") == "database":
+            # Excalidraw has no cylinder. An ellipse is the one primitive that is not a box, and
+            # a C4 diagram gives an ellipse no other meaning; the label still says Container.
+            shape_kind = "ellipse"
         stroke_style = "dashed" if node.get("boundary") else "solid"
+        text = c4_label(node, str(node.get("label") or nid)) if is_c4 else str(
+            node.get("label") or nid)
         shape, label = scene.labelled_shape(
-            f"node/{nid}", shape_kind, str(node.get("label") or nid), 0, 0,
-            MIN_NODE_W * 3, MIN_NODE_H * 3,
+            f"node/{nid}", shape_kind, text, 0, 0,
+            c4_min_width(scene, text, font_size) if is_c4 else MIN_NODE_W * 3, MIN_NODE_H * 3,
             colours["stroke"] if role != "ink" else NEUTRAL_STROKE,
             colours["bg"], font_size, stroke_style)
+        c4_kind = node.get("c4") or ("boundary" if node.get("boundary") else None)
+        data = custom_data(
+            ("c4", str(c4_kind) if is_c4 and c4_kind else None),
+            ("tech", str(node["tech"]) if node.get("tech") else None),
+            ("external", True if node.get("external") else None),
+            ("shape", str(node["shape"]) if node.get("shape") else None),
+            ("provenance", {"at": check_at(f"node {nid!r}", node["at"])}
+             if "at" in node else None))
+        if data:
+            shape["customData"] = data
         shapes[nid] = shape
         if label:
             labels[nid] = label
@@ -639,10 +830,32 @@ def build(spec: dict, spec_bytes: bytes, stamp: int = FIXED_EPOCH) -> dict:
         col_w[cc] = max(col_w.get(cc, 0.0), shapes[nid]["width"])
         row_h[rr] = max(row_h.get(rr, 0.0), shapes[nid]["height"])
 
+    def rank_of(nid: str) -> int:
+        # rank is always the SECOND slot of the grid tuple. `horizontal` decides which screen axis
+        # the rank maps to, not which tuple element holds it, and conflating the two silently
+        # disabled every skip-edge detour.
+        return int(grid[nid][1])
+
+    # A labelled arrow between adjacent ranks needs the gutter to be wider than its label, or the
+    # label lands on the boxes at either end. Seen on the first C4 example, whose labels carry a
+    # technology line. Measured at the arrow-label wrap floor, which is the width it will get.
+    gaps: dict[int, float] = {}
+    if horizontal:
+        size, font_id = FONT_SIZES["sm"], scene.style["font"]
+        floor = max_text_width("arrow", 0, size)
+        for e in edges_raw:
+            ra, rb = rank_of(str(e["from"])), rank_of(str(e["to"]))
+            text = edge_label(e)
+            if abs(ra - rb) != 1 or not text:
+                continue
+            wrapped = "\n".join(scene.m.wrap(text, font_id, size, floor))
+            need = scene.m.measure(wrapped, font_id, size)[0] + 2 * LABEL_CLEARANCE
+            gaps[min(ra, rb)] = max(gaps.get(min(ra, rb), GUTTER_X), need)
+
     x_at, acc = {}, float(ORIGIN)
     for c in sorted(col_w):
         x_at[c] = acc
-        acc += col_w[c] + GUTTER_X
+        acc += col_w[c] + gaps.get(c, GUTTER_X)
     y_at, acc = {}, float(ORIGIN)
     for r in sorted(row_h):
         y_at[r] = acc
@@ -668,29 +881,57 @@ def build(spec: dict, spec_bytes: bytes, stamp: int = FIXED_EPOCH) -> dict:
         if nid in labels:
             out.append(labels[nid])
 
-    def rank_of(nid: str) -> int:
-        # rank is always the SECOND slot of the grid tuple. `horizontal` decides which screen axis
-        # the rank maps to, not which tuple element holds it, and conflating the two silently
-        # disabled every skip-edge detour.
-        return int(grid[nid][1])
+
+    # Every arrow between the same two nodes, either direction, gets its own lane 20 px from the
+    # next, so a reverse pair or a repeated edge never shares one line. Lanes are counted in the
+    # direction of the first such edge; `offset` is to each arrow's own right, so a reverse arrow
+    # takes the negated lane. Reverse arrows take the first lanes, which puts a plain pair 10 px to
+    # each arrow's right, as before.
+    lanes: dict[frozenset, list[int]] = {}
+    for i, (a, b) in enumerate(edges):
+        if a != b:
+            lanes.setdefault(frozenset((a, b)), []).append(i)
+    offsets: dict[int, float] = {}
+    for members in lanes.values():
+        if len(members) < 2:
+            continue
+        first = edges[members[0]]
+        order = [i for i in members if edges[i] != first] + [i for i in members
+                                                              if edges[i] == first]
+        for k, i in enumerate(order):
+            lane = REVERSE_PAIR_OFFSET * (2 * k - (len(order) - 1))
+            offsets[i] = lane if edges[i] == first else -lane
 
     for i, e in enumerate(edges_raw):
         a, b = str(e["from"]), str(e["to"])
         skipped = abs(rank_of(a) - rank_of(b))
         detour = 0.0 if skipped <= 1 else (GUTTER_Y * 0.9 + 20 * (skipped - 1))
+        offset = offsets.get(i, 0.0)
         style = "dashed" if e.get("style") == "dashed" else "solid"
         head = None if e.get("arrow") is False else "arrow"
         colours = PALETTE.get(str(e.get("color") or "ink"), PALETTE["ink"])
-        out.extend(scene.arrow(f"edge/{i}/{a}->{b}", shapes[a], shapes[b],
-                               str(e.get("label") or ""),
-                               colours["stroke"] if e.get("color") else NEUTRAL_STROKE,
-                               style, head, detour))
+        label = edge_label(e)
+        tech = str(e.get("tech") or "")
+        drawn = scene.arrow(f"edge/{i}/{a}->{b}", shapes[a], shapes[b], label,
+                            colours["stroke"] if e.get("color") else NEUTRAL_STROKE,
+                            style, head, detour, offset)
+        data = custom_data(
+            ("c4", "relationship" if is_c4 else None),
+            ("tech", tech or None),
+            ("provenance", {"at": check_at(f"edge {i}", e["at"])} if "at" in e else None))
+        if data:
+            drawn[0]["customData"] = data
+        out.extend(drawn)
 
     if spec.get("title"):
         min_x = min(el["x"] for el in out)
         min_y = min(el["y"] for el in out)
         title = scene.text_element("title", str(spec["title"]), min_x, min_y - 70,
                                    FONT_SIZES["xl"], scene.style["font"])
+        # The marker is how exlint finds the title without guessing from geometry, and the
+        # diagram-wide provenance lives here because the title is the one element every
+        # sourced diagram has.
+        title["customData"] = custom_data(("role", "title"), ("provenance", source))
         out.insert(0, title)
 
     for note in spec.get("notes") or []:
@@ -722,6 +963,16 @@ def build(spec: dict, spec_bytes: bytes, stamp: int = FIXED_EPOCH) -> dict:
 
 
 def main() -> int:
+    """Exit 2 on a spec error or any crash, so no failure can look like another exit code."""
+    try:
+        return checked_main()
+    except Exception as exc:  # noqa: BLE001 - the exit code contract, see the docstring
+        kind = type(exc).__name__
+        print(f"internal error: {kind}: {exc}", file=sys.stderr)
+        return 2
+
+
+def checked_main() -> int:
     ap = argparse.ArgumentParser(description="Build a .excalidraw file from a spec.")
     ap.add_argument("spec", type=Path, help="spec file (.yaml or .json)")
     ap.add_argument("-o", "--output", type=Path, help="output .excalidraw (default: alongside)")
@@ -735,6 +986,8 @@ def main() -> int:
         if args.stamp_now:
             import time  # noqa: PLC0415 - only needed on this branch
             stamp = int(time.time() * 1000)
+        if not isinstance(spec, dict):
+            raise SpecError("the spec must be a mapping at the top level")
         scene = build(spec, raw, stamp)
     except SpecError as exc:
         print(f"spec error: {exc}", file=sys.stderr)

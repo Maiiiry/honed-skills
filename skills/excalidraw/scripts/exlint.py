@@ -17,19 +17,22 @@ error   the file is wrong: it will look broken, break on interaction, or drop an
 warn    the file is valid but breaks a rule that measurement associates with bad diagrams
 note    worth a glance, commonly fine
 
-Exit 0 when there is no error, 1 when there is, 2 when the file cannot be read. `--strict` promotes
+Exit 0 when there is no error, 1 when there is, 2 when the file cannot be read or the linter
+itself fails. `--strict` promotes
 warnings to errors.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import sys
 from pathlib import Path
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
+EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
 VALID_TYPES = {"rectangle", "diamond", "ellipse", "text", "line", "arrow", "freedraw",
                "image", "frame", "magicframe", "iframe", "embeddable"}
@@ -85,12 +88,10 @@ def boxes_overlap(a: dict, b: dict, slack: float = 0.0) -> bool:
 
 
 def segment_hits_box(p1, p2, box, inset: float = 2.0) -> bool:
-    """Does the segment cross the box interior? Sampled rather than solved: 64 points along the
-    segment is enough for a 20 px inset and keeps this readable."""
-    x0, y0 = box["x"] + inset, box["y"] + inset
-    x1, y1 = box["x"] + box["width"] - inset, box["y"] + box["height"] - inset
-    if x1 <= x0 or y1 <= y0:
-        return False
+    """Does the segment cross the box interior, shrunk by `inset`? Solved exactly by
+    segment_hits_rect, which replaced a 64-point sample that could step over a thin box."""
+    return segment_hits_rect(p1, p2, box["x"] + inset, box["y"] + inset,
+                             box["x"] + box["width"] - inset, box["y"] + box["height"] - inset)
     for i in range(1, 64):
         t = i / 64
         px = p1[0] + (p2[0] - p1[0]) * t
@@ -98,6 +99,197 @@ def segment_hits_box(p1, p2, box, inset: float = 2.0) -> bool:
         if x0 < px < x1 and y0 < py < y1:
             return True
     return False
+
+
+# ---------------------------------------------------------------- strokes, solved exactly
+#
+# Crossings are the one layout aesthetic with measured weight: Purchase 1997 found them significant
+# for both errors and response time and different from every other aesthetic tested, so they are
+# a warn. Bends were significant for errors only and have no measured threshold, so there is no
+# bend rule. A multi-point arrow, rounded or not, is tested as its polyline: the rounding is drawn
+# within a few px of the corner and does not move a crossing.
+
+EPS = 0.5      # px: two points closer than this are one point
+RING = 8.0     # px: a crossing this close to an end that both strokes bind to one shape is a fan-out
+STROKES = {"arrow", "line"}
+
+
+def orient(a, b, c) -> float:
+    """Twice the signed area of triangle abc: > 0 counter-clockwise, < 0 clockwise."""
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+
+def distance(a, b) -> float:
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def point_to_segment(pt, a, b) -> float:
+    """Distance from a point to the closed segment ab."""
+    length2 = (b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2
+    if length2 < 1e-18:
+        return distance(pt, a)
+    t = ((pt[0] - a[0]) * (b[0] - a[0]) + (pt[1] - a[1]) * (b[1] - a[1])) / length2
+    t = max(0.0, min(1.0, t))
+    return distance(pt, (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
+
+
+def segment_intersection(p1, p2, q1, q2) -> tuple[str, list[tuple[float, float]]]:
+    """Exact segment-segment intersection by orientation tests.
+
+    Returns ("none", []), ("point", [p]) for a crossing or a touch, or ("overlap", [a, b]) when the
+    two are collinear and share a piece longer than EPS. Collinearity is judged by distance to the
+    other line, so a stroke 0.3 px off a trunk still counts as on it.
+    """
+    lp, lq = distance(p1, p2), distance(q1, q2)
+    if lp < 1e-9 or lq < 1e-9:
+        return "none", []
+    d1, d2 = orient(q1, q2, p1), orient(q1, q2, p2)
+    d3, d4 = orient(p1, p2, q1), orient(p1, p2, q2)
+    near = (abs(d1) / lq < EPS, abs(d2) / lq < EPS, abs(d3) / lp < EPS, abs(d4) / lp < EPS)
+    if all(near):
+        ux, uy = (p2[0] - p1[0]) / lp, (p2[1] - p1[1]) / lp
+        def along(pt) -> float:
+            return (pt[0] - p1[0]) * ux + (pt[1] - p1[1]) * uy
+        lo = max(0.0, min(along(q1), along(q2)))
+        hi = min(lp, max(along(q1), along(q2)))
+        if hi - lo > EPS:
+            return "overlap", [(p1[0] + ux * lo, p1[1] + uy * lo),
+                               (p1[0] + ux * hi, p1[1] + uy * hi)]
+        if hi - lo >= -EPS:
+            mid = (lo + hi) / 2
+            return "point", [(p1[0] + ux * mid, p1[1] + uy * mid)]
+        return "none", []
+    # An endpoint lying on the other segment is a touch, reported as a point.
+    for flag, pt, a, b in ((near[0], p1, q1, q2), (near[1], p2, q1, q2),
+                           (near[2], q1, p1, p2), (near[3], q2, p1, p2)):
+        if flag and min(a[0], b[0]) - EPS <= pt[0] <= max(a[0], b[0]) + EPS \
+                and min(a[1], b[1]) - EPS <= pt[1] <= max(a[1], b[1]) + EPS:
+            return "point", [pt]
+    if (d1 > 0) != (d2 > 0) and (d3 > 0) != (d4 > 0):
+        t = d1 / (d1 - d2)
+        return "point", [(p1[0] + (p2[0] - p1[0]) * t, p1[1] + (p2[1] - p1[1]) * t)]
+    return "none", []
+
+
+def segment_hits_rect(p1, p2, x0: float, y0: float, x1: float, y1: float) -> bool:
+    """Liang-Barsky: does the segment enter the open rectangle? Exact, unlike the sampled test."""
+    if x1 <= x0 or y1 <= y0:
+        return False
+    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+    lo, hi = 0.0, 1.0
+    for p, q in ((-dx, p1[0] - x0), (dx, x1 - p1[0]), (-dy, p1[1] - y0), (dy, y1 - p1[1])):
+        if abs(p) < 1e-12:
+            if q <= 0:
+                return False
+            continue
+        r = q / p
+        if p < 0:
+            lo = max(lo, r)
+        else:
+            hi = min(hi, r)
+        if lo >= hi:
+            return False
+    return True
+
+
+def stroke_list(elements: list[dict]) -> list[dict]:
+    """Every arrow and line as an absolute polyline plus the shape each end is bound to."""
+    out = []
+    for el in elements:
+        pts = el.get("points") or []
+        if el.get("type") not in STROKES or len(pts) < 2 or not finite(el.get("x"), el.get("y")):
+            continue
+        poly = [(el["x"] + p[0], el["y"] + p[1]) for p in pts
+                if isinstance(p, list) and len(p) == 2 and finite(*p)]
+        ends = []
+        for side in ("startBinding", "endBinding"):
+            binding = el.get(side)
+            ends.append(binding.get("elementId") if isinstance(binding, dict) else None)
+        if len(poly) < 2:
+            continue                     # malformed points: points-count and points-origin say so
+        out.append({"id": el.get("id", "?"), "poly": poly, "start": ends[0], "end": ends[1]})
+    return out
+
+
+def stroke_conflicts(elements: list[dict]):
+    """(crossings, overlaps): crossings as (a, b, points), overlaps as (a, b).
+
+    Exempt, each because the picture reads as intended rather than tangled:
+      - a touch: the point is an END of either polyline (a bus spur meeting its trunk);
+      - a fan-out or fan-in: the point is within RING of an end of each stroke, and those two ends
+        bind to the same shape;
+      - a bus trunk: a collinear overlap of two strokes that share exactly ONE bound end, the
+        start (a trunk that later splits) or the end (spurs merging into one target). Two strokes
+        that share both ends are a duplicate drawn on top of itself, and are reported;
+      - any point on an overlap piece, which is reported once as the overlap, not again.
+    """
+    strokes = stroke_list(elements)
+    crossings, overlaps = [], []
+    for i, a in enumerate(strokes):
+        for b in strokes[i + 1:]:
+            pieces, points, bad_overlap = [], [], False
+            hits = []
+            for p1, p2 in zip(a["poly"], a["poly"][1:]):
+                for q1, q2 in zip(b["poly"], b["poly"][1:]):
+                    kind, where = segment_intersection(p1, p2, q1, q2)
+                    if kind == "overlap":
+                        pieces.append(where)
+                        same_start = bool(a["start"]) and a["start"] == b["start"]
+                        same_end = bool(a["end"]) and a["end"] == b["end"]
+                        if same_start == same_end:
+                            bad_overlap = True
+                    elif kind == "point":
+                        hits.append(where[0])
+            if bad_overlap:
+                overlaps.append((a["id"], b["id"]))
+            ends_a = ((a["poly"][0], a["start"]), (a["poly"][-1], a["end"]))
+            ends_b = ((b["poly"][0], b["start"]), (b["poly"][-1], b["end"]))
+            for pt in hits:
+                if any(distance(pt, e) < EPS for e, _ in ends_a + ends_b):
+                    continue
+                if any(ta and ta == tb and distance(pt, ea) <= RING and distance(pt, eb) <= RING
+                       for ea, ta in ends_a for eb, tb in ends_b):
+                    continue
+                if any(point_to_segment(pt, s, e) < EPS for s, e in pieces):
+                    continue
+                if not any(distance(pt, seen) < EPS for seen in points):
+                    points.append(pt)
+            if points:
+                crossings.append((a["id"], b["id"], points))
+    return crossings, overlaps
+
+
+def count_crossings(scene: dict) -> int:
+    elements = scene.get("elements") if isinstance(scene.get("elements"), list) else []
+    return sum(len(pts) for _, _, pts in stroke_conflicts(elements)[0])
+
+
+# ---------------------------------------------------------------- C4 and provenance
+
+C4_TAG = "c4model checklist"
+C4_TOO_MANY = 20
+# A relationship label that says nothing about intent. Compared against the WHOLE label after the
+# bracketed technology line and punctuation are stripped, so "uses the cache" passes.
+VAGUE_EDGES = {"uses", "calls", "connects to", "talks to", "depends on", "interacts with"}
+HEX = set("0123456789abcdefABCDEF")
+
+
+def custom(el: dict) -> dict:
+    data = el.get("customData")
+    return data if isinstance(data, dict) else {}
+
+
+def plain_label(text: str) -> str:
+    """Lower case, the [technology] line removed, punctuation and whitespace collapsed."""
+    out, depth = [], 0
+    for ch in text:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth = max(0, depth - 1)
+        elif not depth:
+            out.append(ch.lower() if ch.isalnum() else " ")
+    return " ".join("".join(out).split())
 
 
 def lint(scene: dict, metrics: dict | None) -> list[Finding]:
@@ -299,7 +491,8 @@ def lint(scene: dict, metrics: dict | None) -> list[Finding]:
                     if abs(v - 0.5) < 1e-4:
                         add("error", "fixedpoint-half", eid,
                             f"{side}.fixedPoint has a coordinate at exactly 0.5, which is "
-                            "snapped to 0.5001 and can flip the arrow heading")
+                            "snapped off centre on load and can flip the arrow heading. Write "
+                            "0.5002: 0.5001 is still inside the 1e-4 guard in IEEE 754")
                     if not -10 <= v <= 10:
                         add("error", "fixedpoint-range", eid,
                             f"{side}.fixedPoint {v} is outside the clamp of -10 to 10")
@@ -370,6 +563,101 @@ def lint(scene: dict, metrics: dict | None) -> list[Finding]:
                         "whole length")
                     break
 
+    # ---- strokes against strokes ----
+    crossings, overlaps = stroke_conflicts(elements)
+    for a_id, b_id, points in crossings:
+        first = points[0]
+        add("warn", "arrow-crossing", f"{a_id}/{b_id}",
+            f"{len(points)} crossing(s), first at ({first[0]:.0f}, {first[1]:.0f}). Crossings are "
+            "the layout aesthetic with the strongest measured effect on reading errors and time "
+            "(Purchase 1997). Reorder, reroute, or split the diagram")
+    for a_id, b_id in overlaps:
+        add("warn", "arrow-overlap", f"{a_id}/{b_id}",
+            "two strokes run along one line and do not end at the same shape, so nobody can "
+            "trace which is which. That is worse than a crossing. Offset one, or merge them into "
+            "a bus that ends at one target")
+    stroke_ids = {s["id"] for s in stroke_list(elements)}
+    arrow_labels = [e for e in elements if e.get("type") == "text"
+                    and e.get("containerId") in stroke_ids
+                    and finite(e.get("x"), e.get("y"), e.get("width"), e.get("height"))]
+    for stroke in stroke_list(elements):
+        for label in arrow_labels:
+            if label["containerId"] == stroke["id"]:
+                continue
+            x0, y0 = label["x"] + 1, label["y"] + 1
+            x1, y1 = label["x"] + label["width"] - 1, label["y"] + label["height"] - 1
+            if any(segment_hits_rect(p1, p2, x0, y0, x1, y1)
+                   for p1, p2 in zip(stroke["poly"], stroke["poly"][1:])):
+                owner = label["containerId"]
+                add("warn", "arrow-through-label", stroke["id"],
+                    f"passes through the label of {owner}. The label backing punches a hole only "
+                    "in its own arrow, so this stroke is drawn over the text")
+
+    # ---- C4, only when the scene says it is C4 ----
+    if any(custom(e).get("c4") for e in elements):
+        bound_text = {e.get("containerId"): str(e.get("text") or "") for e in elements
+                      if e.get("type") == "text" and e.get("containerId")}
+
+        def contains(outer: dict, inner: dict) -> bool:
+            return (outer is not inner and outer["x"] <= inner["x"] and outer["y"] <= inner["y"]
+                    and outer["x"] + outer["width"] >= inner["x"] + inner["width"]
+                    and outer["y"] + outer["height"] >= inner["y"] + inner["height"])
+
+        containers = 0
+        for s in shapes:
+            c4 = custom(s).get("c4")
+            boundary = c4 == "boundary" or any(contains(s, other) for other in shapes)
+            if not c4 and not boundary:
+                add("note", "c4-untyped", s["id"],
+                    f"{C4_TAG}: this shape has no C4 type. Say whether it is a person, a "
+                    "software system, a container or a component")
+            if c4 in ("container", "component") and not custom(s).get("tech"):
+                add("note", "c4-no-tech", s["id"],
+                    f"{C4_TAG}: a {c4} with no technology. Name it, for example Postgres or "
+                    "a Python web app")
+            if c4 == "container":
+                containers += 1
+        for arrow in (e for e in elements if e.get("type") == "arrow"):
+            text = bound_text.get(arrow.get("id"), "")
+            said = plain_label(text)
+            if not said:
+                add("note", "c4-vague-edge", arrow.get("id", "?"),
+                    f"{C4_TAG}: a relationship with no label. Say what flows and why")
+            elif said in VAGUE_EDGES:
+                add("note", "c4-vague-edge", arrow.get("id", "?"),
+                    f"{C4_TAG}: the label {said!r} names no intent. Say what is read, written "
+                    "or sent")
+        titled = any(custom(e).get("role") == "title" for e in elements)
+        if not titled and shapes:
+            top = min(s["y"] for s in shapes)
+            titled = any(e.get("type") == "text" and not e.get("containerId")
+                         and finite(e.get("y"), e.get("height"))
+                         and e["y"] + e["height"] <= top for e in elements)
+        if not titled:
+            add("note", "c4-no-title", "-",
+                f"{C4_TAG}: no title. Name the diagram type and its scope above the shapes")
+        if containers >= C4_TOO_MANY:
+            add("note", "c4-too-many", "-",
+                f"{C4_TAG}: {containers} containers. At {C4_TOO_MANY} or more, split the "
+                "diagram by zoom level or by subsystem")
+
+    # ---- provenance, only when the scene declares a source ----
+    source = next((custom(e).get("provenance") for e in elements
+                   if custom(e).get("role") == "title"
+                   and isinstance(custom(e).get("provenance"), dict)), None)
+    if source is not None:
+        commit = str(source.get("commit") or "")
+        if not 7 <= len(commit) <= 64 or not set(commit) <= HEX:
+            add("error", "provenance-commit", "-",
+                f"source commit {commit!r} is not 7 to 64 hex characters, so no reader can "
+                "check out what this diagram claims")
+        for el in shapes + [e for e in elements if e.get("type") == "arrow"]:
+            prov = custom(el).get("provenance")
+            if not (isinstance(prov, dict) and prov.get("at")):
+                add("warn", "provenance-missing", el.get("id", "?"),
+                    "the diagram declares a source, but this element cites no `at`. Point it at "
+                    "path:lines, or write `at: external` for a box outside the code")
+
     # text overflowing its container
     for el in elements:
         if el.get("type") != "text" or not el.get("containerId"):
@@ -438,10 +726,326 @@ def lint(scene: dict, metrics: dict | None) -> list[Finding]:
     return out
 
 
+# The two shipped examples, as JSON-able dicts, so the clean cases run on a bare python3 with no
+# PyYAML. When PyYAML is present the self-test asserts these still equal examples/*.yaml.
+EXAMPLE_SPECS = {
+    "request-path": {
+        "type": "flow", "title": "Request path", "style": "architecture", "fontSize": "md",
+        "nodes": [{"id": "browser", "label": "Browser"}, {"id": "cdn", "label": "CDN"},
+                  {"id": "lb", "label": "Load balancer"},
+                  {"id": "api", "label": "API", "color": "blue"},
+                  {"id": "cache", "label": "Redis"}, {"id": "db", "label": "Postgres"}],
+        "edges": [{"from": "browser", "to": "cdn"}, {"from": "cdn", "to": "lb"},
+                  {"from": "lb", "to": "api"},
+                  {"from": "api", "to": "cache", "label": "read"},
+                  {"from": "api", "to": "db", "label": "write"},
+                  {"from": "cache", "to": "db", "label": "miss", "style": "dashed"}],
+        "notes": [{"at": "api", "text": "rate-limited, 100 rps"}],
+    },
+    "c4": {
+        "type": "c4", "title": "Online shop, containers", "style": "architecture",
+        "fontSize": "md",
+        "source": {"repo": "example.org/acme/shop",
+                   "commit": "3f9a2c1d8e7b6a5f4c3d2e1f0a9b8c7d6e5f4a3b"},
+        "nodes": [
+            {"id": "customer", "label": "Customer", "c4": "person", "at": "external"},
+            {"id": "web", "label": "Web shop", "c4": "container", "tech": "TypeScript, React",
+             "at": "web/src/App.tsx:1-80"},
+            {"id": "api", "label": "Orders API", "c4": "container", "tech": "Python, FastAPI",
+             "at": "api/orders/routes.py:12-140"},
+            {"id": "db", "label": "Orders database", "c4": "container", "tech": "Postgres",
+             "shape": "database", "at": "api/orders/models.py:1-60"},
+            {"id": "pay", "label": "Payment provider", "c4": "system", "external": True,
+             "at": "external"}],
+        "edges": [
+            {"from": "customer", "to": "web", "label": "Places orders", "tech": "HTTPS",
+             "at": "external"},
+            {"from": "web", "to": "api", "label": "Submits orders", "tech": "JSON over HTTPS",
+             "at": "web/src/api/client.ts:20-44"},
+            {"from": "api", "to": "db", "label": "Reads and writes orders", "tech": "SQL",
+             "at": "api/orders/repository.py:8-90"},
+            {"from": "api", "to": "pay", "label": "Charges cards", "tech": "HTTPS",
+             "at": "api/payments/client.py:15-52"}],
+    },
+}
+
+
+def stroke_cases(case, base_scene, text_el, failures: list[str], checked: list[int]) -> None:
+    """arrow-crossing, arrow-overlap and arrow-through-label: each fires on its defect and stays
+    silent on the layouts that look like it and are fine (fan-out, fan-in bus, merging trunk)."""
+    template = base_scene()["elements"][0]
+
+    def box(eid: str, x: float, y: float) -> dict:
+        return dict(template, id=eid, x=x, y=y, seed=sum(map(ord, eid)) + 10, boundElements=[])
+
+    def stroke(scene: dict, eid: str, points, src=None, dst=None, kind="arrow") -> dict:
+        x0, y0 = points[0]
+        rel = [[round(px - x0, 2), round(py - y0, 2)] for px, py in points]
+        xs, ys = [p[0] for p in rel], [p[1] for p in rel]
+        el = dict(template, id=eid, type=kind, x=x0, y=y0, width=max(xs) - min(xs),
+                  height=max(ys) - min(ys), roundness={"type": 2}, seed=sum(map(ord, eid)) + 20,
+                  boundElements=[], points=rel, startArrowhead=None,
+                  endArrowhead="arrow" if kind == "arrow" else None,
+                  startBinding=None, endBinding=None)
+        by_id = {e["id"]: e for e in scene["elements"]}
+        for side, target in (("startBinding", src), ("endBinding", dst)):
+            if target:
+                el[side] = {"elementId": target, "fixedPoint": [0.25, 0.25], "mode": "orbit"}
+                by_id[target]["boundElements"] = by_id[target]["boundElements"] + [
+                    {"type": "arrow", "id": eid}]
+        scene["elements"].append(el)
+        return el
+
+    def boxes(scene: dict, *spec) -> None:
+        scene["elements"] = [box(*b) for b in spec]
+
+    def x_crossing(scene):
+        boxes(scene, ("A", 100, 100), ("B", 500, 100), ("C", 100, 400), ("D", 500, 400))
+        stroke(scene, "ad", [(256, 130), (494, 430)], "A", "D")
+        stroke(scene, "cb", [(256, 430), (494, 130)], "C", "B")
+
+    def parallel(scene):
+        boxes(scene, ("A", 100, 100), ("B", 500, 100), ("C", 100, 400), ("D", 500, 400))
+        stroke(scene, "ab", [(256, 130), (494, 130)], "A", "B")
+        stroke(scene, "cd", [(256, 430), (494, 430)], "C", "D")
+
+    def fan_out(shared: bool):
+        # Two arrows leave A a few px apart and cross 4 to 7 px from their start: within the ring
+        # of an end both bind to A, so it is a fan-out. Unbind one start and it is a crossing.
+        def inner(scene):
+            boxes(scene, ("A", 100, 100), ("B", 400, 100), ("C", 400, 300))
+            stroke(scene, "ab", [(256, 132), (394, 130)], "A" if shared else None, "B")
+            stroke(scene, "ac", [(256, 126), (394, 330)], "A", "C")
+        return inner
+
+    def fan_in_bus(scene):
+        boxes(scene, ("S1", 100, 100), ("S2", 100, 250), ("S3", 100, 400), ("H", 600, 250))
+        stroke(scene, "spur1", [(256, 130), (450, 130)], kind="line")
+        stroke(scene, "spur2", [(256, 280), (450, 280)], kind="line")
+        stroke(scene, "spur3", [(256, 430), (450, 430)], kind="line")
+        stroke(scene, "trunk", [(450, 130), (450, 430)], kind="line")
+        stroke(scene, "tohub", [(450, 280), (594, 280)], None, "H")
+
+    def merging_trunk(scene):
+        boxes(scene, ("S1", 100, 100), ("S3", 100, 400), ("H", 600, 250))
+        stroke(scene, "s1h", [(256, 130), (450, 130), (450, 280), (594, 280)], "S1", "H")
+        stroke(scene, "s3h", [(256, 430), (450, 430), (450, 280), (594, 280)], "S3", "H")
+
+    def reverse_pair(scene):
+        boxes(scene, ("box1", 100, 100), ("box2", 400, 100))
+        stroke(scene, "ab", [(256, 130), (394, 130)], "box1", "box2")
+        stroke(scene, "ba", [(394, 130), (256, 130)], "box2", "box1")
+
+    def duplicate(scene):
+        boxes(scene, ("box1", 100, 100), ("box2", 400, 100))
+        stroke(scene, "ab", [(256, 130), (394, 130)], "box1", "box2")
+        stroke(scene, "ab2", [(256, 130), (394, 130)], "box1", "box2")
+
+    def split_trunk(scene):
+        boxes(scene, ("A", 100, 250), ("B", 600, 100), ("C", 600, 400))
+        stroke(scene, "ab", [(256, 280), (400, 280), (400, 130), (594, 130)], "A", "B")
+        stroke(scene, "ac", [(256, 280), (400, 280), (400, 430), (594, 430)], "A", "C")
+
+    def three_d(scene):
+        boxes(scene, ("box1", 100, 100), ("box2", 400, 100))
+        stroke(scene, "ab", [(256, 130), (394, 130)], "box1", "box2")
+        bad = stroke(scene, "bad", [(256, 150), (394, 150)])
+        bad["points"] = [[0, 0, 0], [138, 0, 0]]
+
+    def labelled(cut: bool):
+        def inner(scene):
+            boxes(scene, ("box1", 100, 100), ("box2", 400, 100))
+            arrow = stroke(scene, "ab", [(256, 130), (394, 130)], "box1", "box2")
+            scene["elements"].append(text_el(id="lab", x=300, y=100, width=50, height=20,
+                                             fontSize=16, containerId="ab"))
+            arrow["boundElements"] = [{"type": "text", "id": "lab"}]
+            if cut:
+                stroke(scene, "cut", [(320, 60), (320, 125)], kind="line")
+        return inner
+
+    case("X crossing", x_crossing, "arrow-crossing")
+    case("parallel arrows", parallel, "arrow-crossing", want=False)
+    case("fan-out from one shape", fan_out(True), "arrow-crossing", want=False)
+    case("near-start crossing, different shapes", fan_out(False), "arrow-crossing")
+    case("fan-in bus of lines", fan_in_bus, "arrow-crossing", want=False)
+    case("fan-in bus of lines", fan_in_bus, "arrow-overlap", want=False)
+    case("merging trunk into one target", merging_trunk, "arrow-crossing", want=False)
+    case("merging trunk into one target", merging_trunk, "arrow-overlap", want=False)
+    case("reverse pair on one line", reverse_pair, "arrow-overlap")
+    case("duplicate drawn on itself", duplicate, "arrow-overlap")
+    case("trunk that splits after a shared start", split_trunk, "arrow-overlap", want=False)
+    case("3-coordinate points, no crash", three_d, "points-origin")
+    case("reverse pair on one line", reverse_pair, "arrow-crossing", want=False)
+    case("stroke through an arrow label", labelled(True), "arrow-through-label")
+    case("arrow and its own label", labelled(False), "arrow-through-label", want=False)
+
+    checked[0] += 1
+    probe = base_scene()
+    x_crossing(probe)
+    if count_crossings(probe) != 1:
+        failures.append(f"count_crossings on one X is {count_crossings(probe)}, not 1")
+
+
+def built_cases(case, rules, failures: list[str], checked: list[int], metrics) -> None:
+    """Clean cases on scenes the builder produced, so a builder change that breaks one shows here,
+    plus the C4 and provenance rules fired by editing a built scene."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    # No bytecode cache: a __pycache__ written next to the scripts ships with the skill, and a
+    # scanner rightly treats bytecode nobody reviewed as a supply-chain finding.
+    sys.dont_write_bytecode = True
+    try:
+        import exdraw  # noqa: PLC0415 - the builder is the system under test for these cases
+    except ImportError as exc:
+        failures.append(f"cannot import exdraw for the built cases: {exc}")
+        return
+    try:
+        import yaml  # noqa: PLC0415 - optional: only checks the dicts above against the files
+    except ImportError:
+        yaml = None
+    if yaml is not None:
+        for name, spec in EXAMPLE_SPECS.items():
+            checked[0] += 1
+            path = EXAMPLES / f"{name}.yaml"
+            if yaml.safe_load(path.read_text(encoding="utf-8")) != spec:
+                failures.append(f"EXAMPLE_SPECS[{name!r}] has drifted from {path.name}")
+
+    def built(spec: dict) -> dict:
+        return exdraw.build(copy.deepcopy(spec))
+
+    for name in EXAMPLE_SPECS:
+        checked[0] += 1
+        scene = built(EXAMPLE_SPECS[name])
+        loud = sorted({f.rule for f in lint(scene, metrics) if f.severity != "note"})
+        quiet = sorted({f.rule for f in lint(scene, metrics) if f.rule.startswith("c4-")})
+        if loud or quiet:
+            failures.append(f"built example {name} is not clean: {loud + quiet}")
+
+    checked[0] += 1
+    pair = built({"type": "flow", "nodes": [{"id": "a"}, {"id": "b"}],
+                  "edges": [{"from": "a", "to": "b", "label": "request"},
+                            {"from": "b", "to": "a", "label": "reply"}]})
+    pair_rules = {f.rule for f in lint(pair, metrics)}
+    for rule in ("arrow-overlap", "arrow-crossing", "arrow-through-label"):
+        if rule in pair_rules:
+            failures.append(f"built reverse pair: {rule} fired, so the offset is missing")
+    checked[0] += 1
+    twice = built({"type": "flow", "nodes": [{"id": "a"}, {"id": "b"}],
+                   "edges": [{"from": "a", "to": "b", "label": "reads"},
+                             {"from": "a", "to": "b", "label": "writes"}]})
+    twice_rules = {f.rule for f in lint(twice, metrics)}
+    for rule in ("arrow-overlap", "arrow-through-label"):
+        if rule in twice_rules:
+            failures.append(f"built duplicate edge: {rule} fired, so the offset is missing")
+
+    def refused(name: str, spec: dict, needle: str = "") -> None:
+        checked[0] += 1
+        try:
+            exdraw.build(copy.deepcopy(spec))
+        except exdraw.SpecError as exc:
+            if needle and needle not in str(exc):
+                failures.append(f"spec error for {name} does not say {needle!r}: {exc}")
+            return
+        except Exception as exc:  # noqa: BLE001 - a crash is the failure being tested for
+            kind = type(exc).__name__
+            failures.append(f"{name}: crashed with {kind} instead of a spec error")
+            return
+        failures.append(f"{name}: built, but must be a spec error")
+
+    flow = {"type": "flow", "title": "t", "nodes": [{"id": "a"}]}
+    for bad_at in ("/etc/x.py", "../x.py", "C:/x.py", "c:x.py", "file:///x.py:1",
+                   "https://example.org/x.py", "%2e%2e/x.py", "a//b.py", ":/x.py", "x\n../y.py",
+                   None, 12):
+        refused(f"at {bad_at!r}", dict(flow, nodes=[{"id": "a", "at": bad_at}]))
+    for bad_repo in ("https://example.org/acme/shop", "file:///x", "../x", "a//b", 7):
+        refused(f"repo {bad_repo!r}",
+                dict(flow, source={"repo": bad_repo, "commit": "abcdef1"}))
+    refused("commit as a number", dict(flow, source={"repo": "r", "commit": 1234567}), "quote")
+    refused("tree with a cycle", {"type": "tree", "nodes": [{"id": "a"}, {"id": "b"}],
+                                  "edges": [{"from": "a", "to": "b"}, {"from": "b", "to": "a"}]})
+    refused("node that is not a mapping", {"type": "flow", "nodes": ["a"]})
+    refused("edge that is not a mapping", {"type": "flow", "nodes": [{"id": "a"}],
+                                           "edges": ["x"]})
+
+    c4 = built(EXAMPLE_SPECS["c4"])
+
+    def edit(change):
+        def inner(scene):
+            scene.clear()
+            scene.update(copy.deepcopy(c4))
+            change(scene["elements"])
+        return inner
+
+    def by_tech(elements, tech):
+        return next(e for e in elements if custom(e).get("tech") == tech
+                    and e.get("type") != "arrow")
+
+    def arrow_text(elements, starts):
+        return next(e for e in elements if e.get("type") == "text"
+                    and str(e.get("text", "")).startswith(starts))
+
+    def relabel(text):
+        return lambda els: arrow_text(els, "Submits").update(text=text, originalText=text)
+
+    def drop_title(els):
+        els.remove(next(e for e in els if custom(e).get("role") == "title"))
+
+    def unmark_title(els):
+        custom(next(e for e in els if custom(e).get("role") == "title")).pop("role")
+
+    def containers(n):
+        def inner(els):
+            for i in range(n):
+                els.append(dict(by_tech(els, "Postgres"), id=f"extra{i}", type="rectangle",
+                                x=3000 + 200 * i, y=100, boundElements=[],
+                                roundness={"type": 3},
+                                customData={"c4": "container", "tech": "Go", "provenance":
+                                            {"at": "external"}}))
+        return inner
+
+    def boundary(geometric: bool):
+        def inner(els):
+            inner_box = dict(by_tech(els, "Postgres"), id="inside", type="rectangle", x=5040,
+                             y=140, width=150, height=60, boundElements=[],
+                             roundness={"type": 3})
+            outer = dict(inner_box, id="scope", x=5000, y=100, width=300, height=200,
+                         customData={} if geometric else {"c4": "boundary"})
+            els.extend([outer, inner_box])
+        return inner
+
+    def set_commit(value):
+        return lambda els: custom(next(e for e in els if custom(e).get("role") == "title"))[
+            "provenance"].update(commit=value)
+
+    case("c4 shape with no type", edit(lambda els: custom(by_tech(els, "Postgres")).pop("c4")),
+         "c4-untyped")
+    case("c4 boundary marked", edit(boundary(False)), "c4-untyped", want=False)
+    case("c4 boundary by containment", edit(boundary(True)), "c4-untyped", want=False)
+    case("c4 container with no tech",
+         edit(lambda els: custom(by_tech(els, "Postgres")).pop("tech")), "c4-no-tech")
+    case("c4 vague edge", edit(relabel("Uses\n[JSON over HTTPS]")), "c4-vague-edge")
+    case("c4 vague edge, punctuated", edit(relabel("Talks to...")), "c4-vague-edge")
+    case("c4 unlabelled edge", edit(relabel("")), "c4-vague-edge")
+    case("c4 edge with intent", edit(relabel("Uses the cache\n[RESP]")), "c4-vague-edge",
+         want=False)
+    case("c4 no title", edit(drop_title), "c4-no-title")
+    case("c4 title found by geometry", edit(unmark_title), "c4-no-title", want=False)
+    case("c4 20 containers", edit(containers(17)), "c4-too-many")
+    case("c4 19 containers", edit(containers(16)), "c4-too-many", want=False)
+    case("provenance missing", edit(
+        lambda els: custom(by_tech(els, "Python, FastAPI")).pop("provenance")),
+        "provenance-missing")
+    case("provenance bad commit", edit(set_commit("nothex!")), "provenance-commit")
+    case("provenance short sha", edit(set_commit("3f9a2c1")), "provenance-commit", want=False)
+    case("no source, no provenance rule",
+         edit(lambda els: custom(next(e for e in els if custom(e).get("role") == "title"))
+              .pop("provenance")), "provenance-missing", want=False)
+
+
 def self_test() -> int:
     """Falsification: seed each defect, assert the rule fires, remove it, assert it stops."""
     metrics = load_metrics()
     failures: list[str] = []
+    checked = [0]   # a real count of the falsification cases run, printed in the summary
 
     def base_scene() -> dict:
         box = {"id": "box1", "type": "rectangle", "x": 100, "y": 100, "width": 150, "height": 60,
@@ -458,6 +1062,7 @@ def self_test() -> int:
         return {f.rule for f in lint(scene, metrics)}
 
     def case(name: str, mutate, rule: str, want: bool = True) -> None:
+        checked[0] += 1
         scene = base_scene()
         mutate(scene)
         fired = rule in rules(scene)
@@ -472,6 +1077,7 @@ def self_test() -> int:
     clean = rules(base_scene())
     for rule in ("node-overlap", "binding-one-sided", "points-origin", "roundness-class",
                  "text-too-narrow", "zero-size", "all-stacked", "id-duplicate"):
+        checked[0] += 1
         if rule in clean:
             failures.append(f"baseline: {rule} fires on a clean scene (false positive)")
 
@@ -497,7 +1103,7 @@ def self_test() -> int:
         for i, c in enumerate(["#ffc9c9", "#b2f2bb", "#a5d8ff", "#ffec99", "#d0bfff", "#e9ecef"])],
         "many-fills")
 
-    def add_text(scene, **over):
+    def text_el(**over) -> dict:
         text = {"id": "t1", "type": "text", "x": 105, "y": 117, "width": 40, "height": 25,
                 "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent",
                 "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1,
@@ -508,6 +1114,10 @@ def self_test() -> int:
                 "lineHeight": 1.25, "textAlign": "center", "verticalAlign": "middle",
                 "containerId": "box1", "autoResize": True, "labelPosition": None}
         text.update(over)
+        return text
+
+    def add_text(scene, **over):
+        text = text_el(**over)
         scene["elements"].insert(1, text)
         scene["elements"][0]["boundElements"] = [{"type": "text", "id": text["id"]}]
         return text
@@ -570,18 +1180,31 @@ def self_test() -> int:
     case("huge arrow", with_arrow({"width": 90000, "points": [[0, 0], [90000, 0]]}),
          "linear-too-large")
 
+    stroke_cases(case, base_scene, text_el, failures, checked)
+    built_cases(case, rules, failures, checked, metrics)
+
     for failure in failures:
         print(f"FAIL {failure}")
-    total = 30
+    total = checked[0]
     # Verdict hoisted out of the f-string: a nested quote inside one opens a span a bounded
     # static parser cannot close, which marks the file partially inspected. See the note in case().
     verdict = "FAIL" if failures else "PASS"
-    print(f"{verdict}: exlint self-test, ~{total} falsification cases, "
+    print(f"{verdict}: exlint self-test, {total} falsification cases, "
           f"{len(failures)} failure(s)")
     return 1 if failures else 0
 
 
 def main() -> int:
+    """Exit 1 means the file has an error, so a crash may not reach it: any crash is exit 2."""
+    try:
+        return checked_main()
+    except Exception as exc:  # noqa: BLE001 - the exit code contract, see the docstring
+        kind = type(exc).__name__
+        print(f"internal error: {kind}: {exc}", file=sys.stderr)
+        return 2
+
+
+def checked_main() -> int:
     ap = argparse.ArgumentParser(description="Lint a .excalidraw file.")
     ap.add_argument("file", nargs="?", type=Path)
     ap.add_argument("--strict", action="store_true", help="treat warnings as errors")
@@ -605,8 +1228,9 @@ def main() -> int:
         counts[f.severity] += 1
         print(f"{f.severity:<5} {f.rule:<24} {f.element:<24} {f.message}")
     total = len(scene.get("elements") or [])
-    print(f"\n{total} elements: {counts['error']} error, {counts['warn']} warn, "
-          f"{counts['note']} note")
+    errors, warns, notes = counts["error"], counts["warn"], counts["note"]
+    print(f"\n{total} elements: {errors} error, {warns} warn, {notes} note, "
+          f"crossings: {count_crossings(scene)}")
     if counts["error"] or (args.strict and counts["warn"]):
         return 1
     return 0

@@ -18,13 +18,15 @@ version: 2
 
 rules:
   - id: "AE1"
-    # HIGH, 1 occurrence. Matched at: SKILL.md:132, pointing at scripts/exlint.py.
+    # HIGH, 1 occurrence. Matched at: SKILL.md:167 (SKILL.md:132 before 1.2.0), pointing at
+    # scripts/exlint.py.
     reason: >-
       AE1 reports that a referenced artifact was not completely inspected, at HIGH and hardcoded
       confidence 1.0, and its remediation asks for the artifact to be made locally available and
       fully analyzable. That remediation does not apply: the file is local, present, readable and
-      590 lines of standard-library Python with no imports beyond argparse, json, math, sys and
-      pathlib. What happens is that a bounded static parser stops early on it and the file is
+      1240 lines of standard-library Python (590 before 1.2.0) with no imports beyond argparse,
+      copy, json, math, sys and pathlib, plus its sibling builder and an optional YAML parser,
+      both loaded only by the self-test. What happens is that a bounded static parser stops early on it and the file is
       therefore reported as partially inspected, which turns the reference to it from SKILL.md into
       this finding. Four causes of that partial state were isolated on 2026-09-09, and this is the
       fourth: an unpaired quote or apostrophe opens a span the parser cannot close, and when the

@@ -11,6 +11,15 @@ its `SKILL.md` frontmatter. The format follows [Keep a Changelog](https://keepac
   contributors.
 - `.github/scripts/check_skills.py`: a CI check for the rules a script can check.
 
+### Changed
+
+- `excalidraw` 1.2.0: lint rules for arrows that cross, overlap or run through another arrow's
+  label, ranked by the evidence (Purchase 1997: crossings hurt reading most). C4 element types,
+  technologies and per-edge source provenance in the spec, with matching lint notes.
+  `exfidelity.py` proves every label and edge of a Mermaid flowchart survives into the drawing.
+  Repeated arrows between two boxes get their own lanes. Ids are now hashed from the parsed spec,
+  so every existing diagram gets new ids and seeds once on its next build.
+
 ## 2026-10-04
 
 ### Added
