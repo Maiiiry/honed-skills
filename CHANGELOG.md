@@ -10,6 +10,8 @@ its `SKILL.md` frontmatter. The format follows [Keep a Changelog](https://keepac
 - Contribution guide, issue forms, pull request template, and a CLA check for first-time
   contributors.
 - `.github/scripts/check_skills.py`: a CI check for the rules a script can check.
+- `screenshot-overlays`: aligns two screenshots of one screen and merges the hover tooltip or
+  popover of one into the other, cut along its own border.
 
 ### Changed
 
