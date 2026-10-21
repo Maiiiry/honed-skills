@@ -12,6 +12,9 @@ its `SKILL.md` frontmatter. The format follows [Keep a Changelog](https://keepac
 - `.github/scripts/check_skills.py`: a CI check for the rules a script can check.
 - `screenshot-overlays`: aligns two screenshots of one screen and merges the hover tooltip or
   popover of one into the other, cut along its own border.
+- `screenshot-callouts`: arrows, boxes, numbered steps, callouts, highlights and solid redactions
+  on a screenshot from a JSON spec, with measured targets, collision-free label placement, a
+  rough.js sketch style, Excalidraw export and a read-back proof of every written file.
 
 ### Changed
 

@@ -1,0 +1,17 @@
+# Accepted findings for the screenshot-callouts skill, with the reason for each.
+#
+# Never quote the string a rule fired on: this file is itself scanned. Give the location instead.
+# Scanned with SkillSpector v2.11.1, static analysis only, on 2026-10-20.
+version: 2
+
+rules:
+  - id: "AE1"
+    # HIGH. Matched at: the SKILL.md references to scripts/annotate.mjs (the install block and the
+    # workflow), reported with why = static_parse_limit.
+    reason: >-
+      AE1 reports that a referenced artifact was not completely inspected. The file is local,
+      present and readable; the scanner's bounded static parser stops early on it, which the
+      scanner itself labels static_parse_limit, so the reference from SKILL.md becomes this
+      finding. The entry point only dispatches to modules under scripts/lib, which the scanner does
+      read, and none of those produced a finding beyond the RP1 hint that was fixed. Re-scan
+      when annotate.mjs changes.
