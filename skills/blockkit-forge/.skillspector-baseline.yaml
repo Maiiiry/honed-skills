@@ -1,0 +1,21 @@
+# Accepted findings for the blockkit-forge skill, with the reason for each.
+#
+# Written by hand, not by `skillspector baseline`, because a fingerprint baseline pins line numbers
+# and says nothing about why. Every entry is a decision, and the reason is the point.
+#
+# SkillSpector does not apply a baseline a skill ships unless you pass --use-shipped-baseline, so
+# this file does not change the number you see when you scan this folder. It shows what we decided.
+version: 2
+
+rules:
+  - id: "LP3"
+    path: "SKILL.md"
+    reason: >-
+      No allowed-tools declaration, on purpose. A skill that declares its own tool scope
+      pre-approves those tools inside your agent, which removes your permission decision instead of
+      informing it, so this repository forbids the field. Rejected alternative: adding it to please
+      the scanner. LP3 fires only because the skill ships scripts.
+
+# NOT baselined, so the absence is not read as an oversight: blockkit.py calls slack.com over HTTPS
+# (blocks.validate, and with a token the user pipes in, chat.scheduleMessage and its delete). That
+# network use is the skill's purpose, and the token is read from stdin, never from an argument.

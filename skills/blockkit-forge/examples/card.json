@@ -1,0 +1,75 @@
+{
+  "text": "Northwind Ltd: Migrate the nightly reporting jobs (In Process)",
+  "blocks": [
+    {
+      "type": "header",
+      "block_id": "head",
+      "text": { "type": "plain_text", "text": "Northwind Ltd: Migrate the nightly reporting jobs" }
+    },
+    {
+      "type": "context",
+      "block_id": "context",
+      "elements": [
+        {
+          "type": "mrkdwn",
+          "verbatim": true,
+          "text": "<https://tickets.example.com/TCK-4821|TCK-4821>  ·  EMEA  ·  Created _Tue Oct 20, 2026, 09:14 UTC_"
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "block_id": "status",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [{ "type": "tag", "text": "In Process", "color": "purple" }]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "block_id": "fields",
+      "fields": [
+        { "type": "mrkdwn", "verbatim": true, "text": "*Requester*\nAlex Doe" },
+        { "type": "mrkdwn", "verbatim": true, "text": "*Manager (cc)*\nSam Lee" },
+        { "type": "mrkdwn", "verbatim": true, "text": "*Owner*\nKim Park" },
+        { "type": "mrkdwn", "verbatim": true, "text": "*Priority*\nMedium" },
+        { "type": "mrkdwn", "verbatim": true, "text": "*Category*\nIntegrations" },
+        { "type": "mrkdwn", "verbatim": true, "text": "*Due*\nFri Oct 30, 2026" }
+      ]
+    },
+    {
+      "type": "container",
+      "block_id": "request",
+      "title": { "type": "plain_text", "text": "Request" },
+      "subtitle": { "type": "plain_text", "text": "We run 40 reporting jobs every night and want to move them…" },
+      "width": "full",
+      "is_collapsible": true,
+      "default_collapsed": true,
+      "child_blocks": [
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "verbatim": true,
+            "text": "We run 40 reporting jobs every night and want to move them to the new scheduler. Two of them run at 02:00 and feed the morning report, so they matter most. Can we plan the move together?"
+          }
+        }
+      ]
+    },
+    {
+      "type": "actions",
+      "block_id": "open",
+      "elements": [
+        {
+          "type": "button",
+          "action_id": "open_record",
+          "text": { "type": "plain_text", "text": "Open in the record" },
+          "url": "https://tickets.example.com/TCK-4821"
+        }
+      ]
+    },
+    { "type": "divider", "block_id": "end" }
+  ]
+}
