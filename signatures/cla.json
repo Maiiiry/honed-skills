@@ -1,3 +1,13 @@
 {
-  "signatures": []
+  "signatures": [
+    {
+      "login": "Yash990-bit",
+      "id": 184806562,
+      "version": "plexito-icla-1.0",
+      "signed_at": "2026-10-22T17:50:51Z",
+      "repository": "Plexito-de/honed-skills",
+      "pull_request": 3,
+      "comment_url": "https://github.com/Plexito-de/honed-skills/pull/3#issuecomment-6347452059"
+    }
+  ]
 }
