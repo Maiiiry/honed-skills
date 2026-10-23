@@ -51,7 +51,8 @@ class CheckSkills(unittest.TestCase):
         long = "word " * 220  # 1,100 characters
         plain = GOOD.replace("Use when testing.", long.strip())
         folded = GOOD.replace("description: Use when testing.", "description: >-\n  " + long.strip())
-        for name, md in (("plain", plain), ("folded", folded)):
+        continued = GOOD.replace("description: Use when testing.", "description: Use when\n  " + long.strip())
+        for name, md in (("plain", plain), ("folded", folded), ("plain, continued", continued)):
             with self.subTest(name):
                 self.assertTrue(any("1,024" in p for p in check(repo(md))), check(repo(md)))
 

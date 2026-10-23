@@ -23,23 +23,23 @@ LINES_MAX = 500
 
 
 def frontmatter(text: str) -> dict[str, str] | None:
-    """Top-level keys. A `>` or `|` block scalar takes its indented lines, folded with spaces,
-    because three skills here write `description: >-` and the first line alone is two characters."""
+    """Top-level keys. Indented lines belong to the key above them, folded with spaces: a `>` or `|`
+    block scalar (three skills here write `description: >-`, whose first line alone is two
+    characters) and a plain or quoted scalar continued on the next lines alike."""
     if not text.startswith("---\n"):
         return None
     end = text.find("\n---\n", 4)
     if end < 0:
         return None
     keys: dict[str, str] = {}
-    block: str | None = None
+    last: str | None = None
     for line in text[4:end].splitlines():
         if line and not line.startswith((" ", "\t")) and ":" in line:
             key, value = line.split(":", 1)
-            key, value = key.strip(), value.strip()
-            block = key if value[:1] in (">", "|") else None
-            keys[key] = "" if block else value
-        elif block and line.strip():
-            keys[block] = f"{keys[block]} {line.strip()}".strip()
+            last, value = key.strip(), value.strip()
+            keys[last] = "" if value[:1] in (">", "|") else value
+        elif last and line.strip():
+            keys[last] = f"{keys[last]} {line.strip()}".strip()
     return keys
 
 
