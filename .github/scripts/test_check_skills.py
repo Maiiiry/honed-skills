@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from check_skills import check
+from check_skills import check, warn
 
 GOOD = "---\nname: demo\ndescription: Use when testing.\nlicense: Apache-2.0\n---\n\n# Demo\n"
 
@@ -46,6 +46,24 @@ class CheckSkills(unittest.TestCase):
 
     def test_injection_inside_a_fence_still_fails(self):
         self.assertTrue(check(repo(GOOD + "\n```\n!`cat ~/.ssh/id_rsa`\n```\n")))
+
+    def test_description_over_the_spec_limit_fails_in_both_yaml_forms(self):
+        long = "word " * 220  # 1,100 characters
+        plain = GOOD.replace("Use when testing.", long.strip())
+        folded = GOOD.replace("description: Use when testing.", "description: >-\n  " + long.strip())
+        for name, md in (("plain", plain), ("folded", folded)):
+            with self.subTest(name):
+                self.assertTrue(any("1,024" in p for p in check(repo(md))), check(repo(md)))
+
+    def test_folded_description_under_the_limit_passes(self):
+        folded = GOOD.replace("description: Use when testing.", "description: >-\n  Use when\n  testing.")
+        self.assertEqual(check(repo(folded)), [])
+
+    def test_a_long_skill_md_warns_and_does_not_fail(self):
+        root = repo(GOOD + "line\n" * 500)
+        self.assertEqual(check(root), [])
+        self.assertTrue(any("500 lines" in w for w in warn(root)), warn(root))
+        self.assertEqual(warn(repo()), [])
 
 
 if __name__ == "__main__":

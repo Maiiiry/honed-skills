@@ -16,8 +16,10 @@ Thank you for your interest. The rules for what a skill must be are in the
 ## Before you open a pull request
 
 1. Run the repository check: `python3 .github/scripts/check_skills.py`. It checks the frontmatter,
-   the `LICENSE` in every skill folder, no `allowed-tools`, no `` !`command` `` injection, and no
-   binary asset inside a skill folder.
+   a `description` of at most 1,024 characters (the Agent Skills specification's limit), the
+   `LICENSE` in every skill folder, no `allowed-tools`, no `` !`command` `` injection, and no binary
+   asset inside a skill folder. It also warns when a `SKILL.md` is over 500 lines, the
+   specification's recommendation; move the detail into `references/`.
 2. Run the skill's own selftest, if it has one, and quote its output in the pull request.
 3. Scan the skill with [NVIDIA SkillSpector](https://github.com/NVIDIA/SkillSpector) and read the
    JSON report. Fix each finding, or explain it in a `.skillspector-baseline.yaml` as the README
