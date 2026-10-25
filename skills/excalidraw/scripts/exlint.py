@@ -1084,7 +1084,7 @@ def built_cases(case, rules, failures: list[str], checked: list[int], metrics) -
     checked[0] += 1
     base_ids = [(e["id"], e.get("seed"), e.get("versionNonce")) for e in c4["elements"]]
     spec_src = copy.deepcopy(EXAMPLE_SPECS["c4"])
-    spec_src["source"]["commit"] = "0000000000000000000000000000000000000000"
+    spec_src["source"]["commit"] = "f" * 40
     res_src = built(spec_src)
     src_ids = [(e["id"], e.get("seed"), e.get("versionNonce")) for e in res_src["elements"]]
     if src_ids != base_ids:
