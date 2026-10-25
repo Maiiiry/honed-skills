@@ -786,3 +786,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+# Automated fix for issue #6: check: validate .github/ISSUE_TEMPLATE/misbehaves.yml options match skills/ (3 skills missing)
